@@ -1,0 +1,60 @@
+# Log files
+*.log
+
+# Audio files directory (contains temporary and saved audio files)
+audio_files/
+
+# Python cache
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+.env/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Backup files
+*.bak
+*.backup
+
+# Temporary files
+*.tmp
+*.temp
+*.mp3
+
+# Compiled Python files
+*.pyc
+*/__pycache__/
+__pycache__/
+
+# Local configuration files that shouldn't be committed
+key.txt
+
+# Editor backup files
+*~
+.*.swp
+.*.swo
+
+# Downloads
+download/
+task.db
