@@ -1,20 +1,27 @@
 # Video to Text Converter
 
-这是一个基于Flet的GUI应用程序，用于调用远程服务将视频转换为文本。
+基于Flet的一键视频文字语音识别与管理工具
+
+1. 本仓库为GUI Client前端程序，需要搭配Server后端程序使用（https://github.com/tk166/Video2Text `python converter_app_remote.py`）
+2. MIT协议
 
 ## 功能特性
 
-1. 视频链接输入
-2. 浏览器选择（Firefox/Edge/Chrome）
-3. Cookie加载选项（自动获取并加密浏览器Cookie）
-4. 音频回传选项
-5. 任务提交与状态监控
-6. 历史任务管理
-7. 结果操作（复制文本、复制路径、导出字幕）
+1. 前后端分离设计，可在多台PC上安装前端（运行GUI），共用同一台PC上部署的后端（运行FunASR语音识别模型）
+2. 视频链接输入、浏览器选择（Firefox/Edge/Chrome）、Cookie加载选项（自动获取并加密浏览器Cookie）
+3. 回传下载音频
+4. 任务提交与状态监控
+5. 历史任务管理
+6. 结果操作（复制文本、编辑字幕、导出字幕）
+7. 完全基于Pyhthon，可跨平台使用
+
+
+![主界面UI](bak/example.png)
+
 
 ## Cookie处理机制
 
-本应用使用`browser-cookie3`库自动获取本地浏览器的Cookie信息，并通过以下步骤确保安全传输：
+本应用使用`rookiepy`库自动获取本地浏览器的Cookie信息，并通过以下步骤确保安全传输：
 
 1. **浏览器支持**: 自动支持Firefox、Edge和Chrome浏览器
 2. **Cookie获取**: 从用户选择的浏览器中提取Cookie信息
@@ -25,7 +32,7 @@
 ## 安装依赖
 
 ```bash
-pip install flet browser-cookie3 cryptography requests
+pip install -r requirements.txt
 ```
 
 ## 运行应用

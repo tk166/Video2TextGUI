@@ -434,106 +434,110 @@ def main(page: ft.Page):
 
     # 5. 任务提交按钮
     def on_submit_click(e):
-        # 获取输入值
-        url = url_input.value
-        browser = browser_dropdown.value
-        use_cookie = cookie_checkbox.value
-        return_download = download_checkbox.value
-
-        # 验证输入
-        if not url:
-            page.snack_bar = ft.SnackBar(
-                content=ft.Text("请输入视频链接"),
-                bgcolor=ft.Colors.RED_500
-            )
-            page.snack_bar.open = True
-            page.update()
-            return
-
-        # 显示正在处理状态
-        status_display.controls.clear()
-        status_display.controls.append(ft.Text("正在处理...", size=16, color=ft.Colors.BLUE))
-        status_display.controls.append(ft.ProgressRing())
-        page.update()
-
-        # 获取Cookie（如果需要）
-        encrypted_cookie_data = None
-        if use_cookie:
-            try:
-                # 获取浏览器Cookie
-                cookie_data = get_cookies_via_rookie(browser)
-                if cookie_data is None:
-                    status_display.controls.clear()
-                    status_display.controls.append(ft.Text(f"获取{browser}浏览器Cookie失败", size=16, color=ft.Colors.RED))
-                    page.update()
-                    return
-
-                if not cookie_data:
-                    status_display.controls.clear()
-                    status_display.controls.append(ft.Text(f"未在{browser}浏览器中找到Cookie", size=16, color=ft.Colors.ORANGE))
-                    page.update()
-                else:
-                    # 加密Cookie数据
-                    encrypted_cookie_data = encrypt_data(cookie_data)
-                    if encrypted_cookie_data is None:
-                        status_display.controls.clear()
-                        status_display.controls.append(ft.Text("Cookie加密失败", size=16, color=ft.Colors.RED))
-                        page.update()
-                        return
-
-            except Exception as ex:
-                status_display.controls.clear()
-                status_display.controls.append(ft.Text(f"处理Cookie时出错: {str(ex)}", size=16, color=ft.Colors.RED))
+        submit_button.disabled = True
+        submit_button.text = "提交中..."
+        submit_button.update() 
+        try:
+            # 获取输入值
+            url = url_input.value
+            browser = browser_dropdown.value
+            use_cookie = cookie_checkbox.value
+            return_download = download_checkbox.value
+            # 验证输入
+            if not url:
+                page.snack_bar = ft.SnackBar(
+                    content=ft.Text("请输入视频链接"),
+                    bgcolor=ft.Colors.RED_500
+                )
+                page.snack_bar.open = True
                 page.update()
                 return
-
-        # 显示准备发送的数据
-        status_display.controls.clear()
-        status_display.controls.append(ft.Text("准备发送请求...", size=16))
-        status_display.controls.append(ft.Text(f"URL: {url}\n浏览器: {browser}\n使用Cookie: {use_cookie}\n回传下载: {return_download}", size=11))
-        if encrypted_cookie_data:
-            status_display.controls.append(ft.Text("Cookie数据已加密", size=11, color=ft.Colors.GREEN))
-        page.update()
-
-        # 发送主任务请求到远程服务
-        result = send_main_task_request(url, encrypted_cookie_data, return_download)
-        print(f"发送主任务请求结果: {str(result)[:500]}")  # 添加终端日志输出
-
-        # 处理API响应
-        status_display.controls.clear()
-        if result["success"]:
-            # 请求成功
-            task_id = result["task_id"]
-            status_display.controls.append(ft.Text(f"任务提交成功！", size=16, color=ft.Colors.GREEN))
-            status_display.controls.append(ft.Text(f"任务ID: {task_id}", size=14))
-            status_display.controls.append(ft.Text(result["message"], size=14))
-            print(f"任务提交成功！任务ID: {task_id}")  # 添加终端日志输出
-
-            # 将任务信息保存到数据库
-            if db_handler.create_task(task_id, url, browser, use_cookie, return_download):
-                status_display.controls.append(ft.Text("任务信息已保存到数据库", size=14, color=ft.Colors.GREEN))
+            # 显示正在处理状态
+            status_display.controls.clear()
+            status_display.controls.append(ft.Text("正在处理...", size=16, color=ft.Colors.BLUE))
+            status_display.controls.append(ft.ProgressRing())
+            status_display.update()
+            # 获取Cookie（如果需要）
+            encrypted_cookie_data = None
+            if use_cookie:
+                try:
+                    # 获取浏览器Cookie
+                    cookie_data = get_cookies_via_rookie(browser)
+                    if cookie_data is None:
+                        status_display.controls.clear()
+                        status_display.controls.append(ft.Text(f"获取{browser}浏览器Cookie失败", size=16, color=ft.Colors.RED))
+                        status_display.update()
+                        return
+                    if not cookie_data:
+                        status_display.controls.clear()
+                        status_display.controls.append(ft.Text(f"未在{browser}浏览器中找到Cookie", size=16, color=ft.Colors.ORANGE))
+                        status_display.update()
+                    else:
+                        # 加密Cookie数据
+                        encrypted_cookie_data = encrypt_data(cookie_data)
+                        if encrypted_cookie_data is None:
+                            status_display.controls.clear()
+                            status_display.controls.append(ft.Text("Cookie加密失败", size=16, color=ft.Colors.RED))
+                            status_display.update()
+                            return
+                except Exception as ex:
+                    status_display.controls.clear()
+                    status_display.controls.append(ft.Text(f"处理Cookie时出错: {str(ex)}", size=16, color=ft.Colors.RED))
+                    status_display.update()
+                    return
+            # 显示准备发送的数据
+            status_display.controls.clear()
+            status_display.controls.append(ft.Text("准备发送请求...", size=16))
+            status_display.controls.append(ft.Text(f"URL: {url}\n浏览器: {browser}\n使用Cookie: {use_cookie}\n回传下载: {return_download}", size=11))
+            if encrypted_cookie_data:
+                status_display.controls.append(ft.Text("Cookie数据已加密", size=11, color=ft.Colors.GREEN))
+            status_display.update()
+            # 发送主任务请求到远程服务
+            result = send_main_task_request(url, encrypted_cookie_data, return_download)
+            print(f"发送主任务请求结果: {str(result)[:500]}")  # 添加终端日志输出
+            # 处理API响应
+            status_display.controls.clear()
+            if result["success"]:
+                # 请求成功
+                task_id = result["task_id"]
+                status_display.controls.append(ft.Text(f"任务提交成功！", size=16, color=ft.Colors.GREEN))
+                status_display.controls.append(ft.Text(f"任务ID: {task_id}", size=14))
+                status_display.controls.append(ft.Text(result["message"], size=14))
+                print(f"任务提交成功！任务ID: {task_id}")  # 添加终端日志输出
+                # 将任务信息保存到数据库
+                if db_handler.create_task(task_id, url, browser, use_cookie, return_download):
+                    status_display.controls.append(ft.Text("任务信息已保存到数据库", size=14, color=ft.Colors.GREEN))
+                else:
+                    status_display.controls.append(ft.Text("任务信息保存到数据库失败", size=14, color=ft.Colors.RED))
+                # 启动定时轮询任务状态
+                poller = TaskStatusPoller(page, task_id, status_display, db_handler, load_history_tasks)
+                # 直接传入协程函数给page.run_task
+                page.run_task(poller.start_polling)
+                print(f"已启动任务状态轮询，任务ID: {task_id}")  # 添加终端日志输出
+                # 重新加载历史任务
+                load_history_tasks()
+                url_input.value = ""
+                url_input.update()
             else:
-                status_display.controls.append(ft.Text("任务信息保存到数据库失败", size=14, color=ft.Colors.RED))
-
-            # 启动定时轮询任务状态
-            poller = TaskStatusPoller(page, task_id, status_display, db_handler, load_history_tasks)
-            # 直接传入协程函数给page.run_task
-            page.run_task(poller.start_polling)
-            print(f"已启动任务状态轮询，任务ID: {task_id}")  # 添加终端日志输出
-
-            # 重新加载历史任务
-            load_history_tasks()
-        else:
-            # 请求失败
-            status_display.controls.append(ft.Text("任务提交失败！", size=16, color=ft.Colors.RED))
-            status_display.controls.append(ft.Text(result["message"], size=14))
-            if result["error"]:
-                status_display.controls.append(ft.Text(f"错误详情: {result['error']}", size=12, color=ft.Colors.RED_300))
-            print(f"任务提交失败！错误信息: {result['message']}")  # 添加终端日志输出
-            if result["error"]:
-                print(f"错误详情: {result['error']}")  # 添加终端日志输出
-
-        page.update()
+                # 请求失败
+                status_display.controls.append(ft.Text("任务提交失败！", size=16, color=ft.Colors.RED))
+                status_display.controls.append(ft.Text(result["message"], size=14))
+                if result["error"]:
+                    status_display.controls.append(ft.Text(f"错误详情: {result['error']}", size=12, color=ft.Colors.RED_300))
+                print(f"任务提交失败！错误信息: {result['message']}")  # 添加终端日志输出
+                if result["error"]:
+                    print(f"错误详情: {result['error']}")  # 添加终端日志输出
+            status_display.update()
+        except Exception as e:
+            # 捕获所有未预料的异常，防止按钮永远卡在“提交中”
+            print(f"提交过程发生未知错误: {e}")
+            page.snack_bar = ft.SnackBar(content=ft.Text(f"发生错误: {e}"), bgcolor=ft.Colors.RED)
+            page.snack_bar.open = True
+            page.update()
+        finally:
+            submit_button.disabled = False
+            submit_button.text = "提交任务"
+            submit_button.update()
 
     submit_button = ft.ElevatedButton(
         text="提交任务",
