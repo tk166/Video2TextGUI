@@ -1,5 +1,5 @@
 flet==0.28.3
-browser-cookie3==0.19.1
+rookiepy
 cryptography==43.0.1
 requests==2.32.3
 aiohttp==3.9.5

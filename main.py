@@ -11,20 +11,19 @@ import aiohttp
 from pathvalidate import sanitize_filename
 from datetime import datetime
 from collections.abc import Mapping
+from db_handler import DatabaseHandler
+from audio_downloader import download_audio_file, cleanup_remote_audio
+from crypto_utils import encrypt_data
 
-# 设置默认编码为UTF-8
+# 设置设置环境变量以及默认编码UTF-8
 if sys.version_info[0] == 3 and sys.version_info[1] >= 7:
     # 对于Python 3.7及以上版本
     import io
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
-
-# 设置环境变量以确保UTF-8编码
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', line_buffering=True)
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', line_buffering=True)
+sys.stdout.reconfigure(line_buffering=True)
 os.environ['PYTHONIOENCODING'] = 'utf-8'
-
-from db_handler import DatabaseHandler
-from audio_downloader import download_audio_file, cleanup_remote_audio
-
+os.environ['NO_PROXY'] = '.local,127.0.0.1,localhost'
 
 # 获取指定浏览器的Cookie
 def get_cookies_via_rookie(browser_name):
@@ -204,7 +203,7 @@ class TaskStatusPoller:
                         else:
                             # 处理HTTP错误，确保错误消息可以正确编码
                             error_msg = f"HTTP错误 {response.status}"
-                            self.update_status_display(error_msg, ft.Colors.RED)
+                            await self.update_status_display(error_msg, ft.Colors.RED)
                             # 确保传递给数据库的错误消息是可编码的
                             safe_error_msg = error_msg.encode('utf-8', errors='ignore').decode('utf-8')
                             self.db_handler.save_task_error(self.task_id, safe_error_msg)
@@ -213,7 +212,7 @@ class TaskStatusPoller:
                             break
             except asyncio.TimeoutError:
                 error_msg = "请求超时"
-                self.update_status_display(error_msg, ft.Colors.RED)
+                await self.update_status_display(error_msg, ft.Colors.RED)
                 # 确保传递给数据库的错误消息是可编码的
                 safe_error_msg = error_msg.encode('utf-8', errors='ignore').decode('utf-8')
                 self.db_handler.save_task_error(self.task_id, safe_error_msg)
@@ -222,7 +221,7 @@ class TaskStatusPoller:
                 break
             except aiohttp.ClientError as e:
                 error_msg = f"连接错误: {str(e)}"
-                self.update_status_display(error_msg, ft.Colors.RED)
+                await self.update_status_display(error_msg, ft.Colors.RED)
                 # 确保传递给数据库的错误消息是可编码的
                 safe_error_msg = error_msg.encode('utf-8', errors='ignore').decode('utf-8')
                 self.db_handler.save_task_error(self.task_id, safe_error_msg)
@@ -231,7 +230,7 @@ class TaskStatusPoller:
                 break
             except Exception as e:
                 error_msg = f"未知错误: {str(e)}"
-                self.update_status_display(error_msg, ft.Colors.RED)
+                await self.update_status_display(error_msg, ft.Colors.RED)
                 # 确保传递给数据库的错误消息是可编码的
                 safe_error_msg = error_msg.encode('utf-8', errors='ignore').decode('utf-8')
                 self.db_handler.save_task_error(self.task_id, safe_error_msg)
@@ -244,6 +243,7 @@ class TaskStatusPoller:
 
     async def update_ui_with_result(self, result):
         """更新UI界面和数据库"""
+        old_status = self.db_handler.get_task_by_id(self.task_id).get('status', 'unknown')
         task_status = result.get("status", "unknown")
         task_progress = result.get("progress", "未知进度")
         print(f"收到任务状态更新: 状态={task_status}, 进度={task_progress}")  # 添加终端日志输出
@@ -281,12 +281,16 @@ class TaskStatusPoller:
                 now = datetime.now()
                 result["result"]["datestr"] = f"{now:%y%m%d}"
             await self.save_result_to_db(result)
+        
+        should_refresh_history = False
+        if task_status in ["completed", "failed"]:
+            should_refresh_history = True
 
         # 刷新历史任务列表以更新状态显示
-        if hasattr(self, 'load_history_tasks') and self.load_history_tasks:
+        if old_status != task_status and should_refresh_history and hasattr(self, 'load_history_tasks') and self.load_history_tasks:
             self.load_history_tasks()
 
-    def update_status_display(self, message, color=ft.Colors.BLACK):
+    async def update_status_display(self, message, color=ft.Colors.BLACK):
         """更新状态显示"""
         # 确保消息是字符串并且可以正确编码
         if not isinstance(message, str):
@@ -545,7 +549,6 @@ def main(page: ft.Page):
                     page.update()
                 else:
                     # 加密Cookie数据
-                    from crypto_utils import encrypt_data
                     encrypted_cookie_data = encrypt_data(cookie_data)
                     if encrypted_cookie_data is None:
                         status_display.controls.clear()
@@ -1478,5 +1481,4 @@ def main(page: ft.Page):
     load_history_tasks()
 
 if __name__ == "__main__":
-    os.environ['NO_PROXY'] = 'tkmini.local,127.0.0.1,localhost'
     ft.app(target=main)
