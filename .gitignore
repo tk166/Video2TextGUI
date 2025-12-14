@@ -41,6 +41,7 @@ Thumbs.db
 *.tmp
 *.temp
 *.mp3
+Error.md
 
 # Compiled Python files
 *.pyc
@@ -58,3 +59,4 @@ key.txt
 # Downloads
 download/
 task.db
+*.db

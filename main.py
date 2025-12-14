@@ -8,12 +8,14 @@ import json
 import traceback
 import asyncio
 import aiohttp
+import platform
 from pathvalidate import sanitize_filename
 from datetime import datetime
 from collections.abc import Mapping
 from db_handler import DatabaseHandler
 from audio_downloader import download_audio_file, cleanup_remote_audio
 from crypto_utils import encrypt_data
+from srt_utils import generate_smart_srt, is_mainly_cjk
 
 # 设置设置环境变量以及默认编码UTF-8
 if sys.version_info[0] == 3 and sys.version_info[1] >= 7:
@@ -24,6 +26,50 @@ if sys.version_info[0] == 3 and sys.version_info[1] >= 7:
 sys.stdout.reconfigure(line_buffering=True)
 os.environ['PYTHONIOENCODING'] = 'utf-8'
 os.environ['NO_PROXY'] = '.local,127.0.0.1,localhost'
+
+# 加载配置文件
+def load_config():
+    """加载配置文件"""
+    config_path = os.path.join(os.path.dirname(__file__), 'settings.json')
+
+    # 默认配置
+    default_config = {
+        "server": {
+            "ip": "tkmini.local",
+            "port": 5001
+        },
+        "paths": {
+            "download_dir": "download",
+            "db_dir": "."
+        }
+    }
+
+    # 如果配置文件不存在，创建默认配置文件
+    if not os.path.exists(config_path):
+        with open(config_path, 'w', encoding='utf-8') as f:
+            json.dump(default_config, f, ensure_ascii=False, indent=4)
+        return default_config
+
+    # 读取配置文件
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+
+        # 用默认配置填充缺失的项
+        for section, values in default_config.items():
+            if section not in config:
+                config[section] = values
+            elif isinstance(values, dict):
+                for key, value in values.items():
+                    if key not in config[section]:
+                        config[section][key] = value
+        return config
+    except Exception as e:
+        print(f"加载配置文件失败: {e}，使用默认配置")
+        return default_config
+
+# 全局配置变量
+CONFIG = load_config()
 
 # 获取指定浏览器的Cookie
 def get_cookies_via_rookie(browser_name):
@@ -54,7 +100,10 @@ def get_cookies_via_rookie(browser_name):
 
 # 初始化数据库
 def init_db():
-    db_handler = DatabaseHandler()
+    # 使用配置中的db_dir，并确保路径兼容性
+    db_dir = CONFIG["paths"]["db_dir"]
+    db_dir = os.path.normpath(db_dir)
+    db_handler = DatabaseHandler(db_path=db_dir)
     return db_handler
 
 # 发送主任务请求到远程服务
@@ -75,8 +124,12 @@ def send_main_task_request(url, encrypted_cookie_data=None, keep_audio=False):
             - error (str): 错误信息（失败时）
     """
     try:
+        # 从配置中获取服务器IP和端口
+        ip = CONFIG["server"]["ip"]
+        port = CONFIG["server"]["port"]
+
         # 构造API请求URL
-        api_url = "http://tkmini.local:5001/api/process"
+        api_url = f"http://{ip}:{port}/api/process"
 
         # 构造请求头
         headers = {
@@ -183,22 +236,25 @@ class TaskStatusPoller:
     async def start_polling(self):
         """开始轮询任务状态"""
         self.is_polling = True
-        print(f"开始轮询任务状态，任务ID: {self.task_id}")  # 添加终端日志输出
+        print(f"开始轮询任务状态，任务ID: {self.task_id}")
+        loop = asyncio.get_event_loop()
+        # 从配置中获取服务器IP和端口
+        ip = CONFIG["server"]["ip"]
+        port = CONFIG["server"]["port"]
         while self.is_polling:
             try:
-                # 使用aiohttp发送异步GET请求
                 async with aiohttp.ClientSession() as session:
-                    async with session.get(f"http://tkmini.local:5001/api/status/{self.task_id}", timeout=30) as response:
-                        print(f"收到状态响应，状态码: {response.status}")  # 添加终端日志输出
+                    async with session.get(f"http://{ip}:{port}/api/status/{self.task_id}", timeout=30) as response:
+                        print(f"收到状态响应，状态码: {response.status}")
                         if response.status == 200:
                             result = await response.json()
-                            print(f"解析到的响应数据: {str(result)[:200]}")  # 添加终端日志输出
+                            print(f"解析到的响应数据: {str(result)[:200]}")
                             await self.update_ui_with_result(result)
 
                             # 如果任务已完成或失败，停止轮询
                             if result.get("status") in ["completed", "failed"]:
                                 self.is_polling = False
-                                print(f"任务已完成或失败，停止轮询，最终状态: {result.get('status')}")  # 添加终端日志输出
+                                print(f"任务已完成或失败，停止轮询，最终状态: {result.get('status')}")
                                 break
                         else:
                             # 处理HTTP错误，确保错误消息可以正确编码
@@ -206,47 +262,28 @@ class TaskStatusPoller:
                             await self.update_status_display(error_msg, ft.Colors.RED)
                             # 确保传递给数据库的错误消息是可编码的
                             safe_error_msg = error_msg.encode('utf-8', errors='ignore').decode('utf-8')
-                            self.db_handler.save_task_error(self.task_id, safe_error_msg)
+                            await loop.run_in_executor(None, self.db_handler.save_task_error, self.task_id, safe_error_msg)
                             self.is_polling = False
-                            print(f"轮询过程中发生HTTP错误: {error_msg}")  # 添加终端日志输出
+                            print(f"轮询过程中发生HTTP错误: {error_msg}")
                             break
-            except asyncio.TimeoutError:
-                error_msg = "请求超时"
-                await self.update_status_display(error_msg, ft.Colors.RED)
-                # 确保传递给数据库的错误消息是可编码的
-                safe_error_msg = error_msg.encode('utf-8', errors='ignore').decode('utf-8')
-                self.db_handler.save_task_error(self.task_id, safe_error_msg)
-                self.is_polling = False
-                print(f"轮询超时错误: {error_msg}")  # 添加终端日志输出
-                break
-            except aiohttp.ClientError as e:
-                error_msg = f"连接错误: {str(e)}"
-                await self.update_status_display(error_msg, ft.Colors.RED)
-                # 确保传递给数据库的错误消息是可编码的
-                safe_error_msg = error_msg.encode('utf-8', errors='ignore').decode('utf-8')
-                self.db_handler.save_task_error(self.task_id, safe_error_msg)
-                self.is_polling = False
-                print(f"轮询连接错误: {error_msg}")  # 添加终端日志输出
-                break
             except Exception as e:
-                error_msg = f"未知错误: {str(e)}"
+                error_msg = f"轮询错误: {str(e)}"
                 await self.update_status_display(error_msg, ft.Colors.RED)
-                # 确保传递给数据库的错误消息是可编码的
                 safe_error_msg = error_msg.encode('utf-8', errors='ignore').decode('utf-8')
-                self.db_handler.save_task_error(self.task_id, safe_error_msg)
+                await loop.run_in_executor(None, self.db_handler.save_task_error, self.task_id, safe_error_msg)
                 self.is_polling = False
-                print(f"轮询未知错误: {error_msg}")  # 添加终端日志输出
+                print(f"轮询错误: {error_msg}")
                 break
 
-            # 等待5秒后再次轮询
-            await asyncio.sleep(5)
+            # 等待2秒后再次轮询
+            await asyncio.sleep(2)
 
     async def update_ui_with_result(self, result):
         """更新UI界面和数据库"""
         old_status = self.db_handler.get_task_by_id(self.task_id).get('status', 'unknown')
         task_status = result.get("status", "unknown")
         task_progress = result.get("progress", "未知进度")
-        print(f"收到任务状态更新: 状态={task_status}, 进度={task_progress}")  # 添加终端日志输出
+        print(f"收到任务状态更新: 状态={task_status}, 进度={task_progress}")
 
         # 确保进度信息是字符串并且可以正确编码
         if not isinstance(task_progress, str):
@@ -259,32 +296,30 @@ class TaskStatusPoller:
 
         # 更新UI状态显示
         self.status_display.controls.clear()
-        self.status_display.controls.append(ft.Text(f"任务状态: {task_status}", size=16, color=status_color))
-        self.status_display.controls.append(ft.Text(f"进度: {task_progress}", size=14))
+        self.status_display.controls.extend([ft.Text(f"任务状态: {task_status}", size=16, color=status_color),
+            ft.Text(f"进度: {task_progress}", size=11)])
 
         # 如果有额外信息，也显示出来
         if "message" in result:
             message = result['message']
-            # 确保消息是字符串并且可以正确编码
             if not isinstance(message, str):
                 message = str(message)
-            self.status_display.controls.append(ft.Text(f"信息: {message}", size=14))
+            self.status_display.controls.append(ft.Text(f"信息: {message}", size=11))
 
-        self.page.update()
+        self.status_display.update()
 
         # 更新数据库状态
-        self.db_handler.update_task_status(self.task_id, task_status, task_progress)
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, self.db_handler.update_task_status, self.task_id, task_status, task_progress)
 
         # 如果任务已完成，处理结果
         if task_status == "completed":
             if "result" in result and isinstance(result["result"], Mapping):
                 now = datetime.now()
                 result["result"]["datestr"] = f"{now:%y%m%d}"
-            await self.save_result_to_db(result)
-        
-        should_refresh_history = False
-        if task_status in ["completed", "failed"]:
-            should_refresh_history = True
+            await self.save_result_to_db(result, loop)
+
+        should_refresh_history = task_status in ["completed", "failed"]
 
         # 刷新历史任务列表以更新状态显示
         if old_status != task_status and should_refresh_history and hasattr(self, 'load_history_tasks') and self.load_history_tasks:
@@ -297,16 +332,17 @@ class TaskStatusPoller:
             message = str(message)
 
         self.status_display.controls.clear()
-        self.status_display.controls.append(ft.Text(message, size=16, color=color))
+        self.status_display.controls.append(ft.Text(message, size=11, color=color))
         self.page.update()
         print(f"状态更新: {message}")  # 添加终端日志输出
 
-    async def save_result_to_db(self, result):
+    async def save_result_to_db(self, result, loop):
         """保存任务结果到数据库"""
         try:
             # 保存结果到数据库
-            if self.db_handler.save_task_result(self.task_id, result.get("result", {})):
-                self.status_display.controls.append(ft.Text("结果已保存到数据库", size=14, color=ft.Colors.GREEN))
+            await loop.run_in_executor(None, self.db_handler.save_task_result, self.task_id, result.get("result", {}))
+            self.status_display.controls.append(ft.Text("结果已保存到数据库", size=11, color=ft.Colors.GREEN))
+            self.status_display.update()
 
             # 如果需要下载音频且结果中有音频URL，则下载音频
             if result.get("result", {}).get("audio_url"):
@@ -314,161 +350,50 @@ class TaskStatusPoller:
                 result_datestr = result["result"].get("datestr", "251212")
                 result_uploader = result["result"].get("uploader", "未知作者")
                 result_title = result["result"].get("title", "未知标题")
+                # 从配置中获取下载目录和服务器信息
+                download_dir = CONFIG["paths"]["download_dir"]
+                ip = CONFIG["server"]["ip"]
+                port = CONFIG["server"]["port"]
 
                 # 下载音频文件
-                audio_file_path = download_audio_file(self.task_id, audio_url, self.db_handler, result_datestr, result_uploader, result_title)
+                audio_file_path = await loop.run_in_executor(None, download_audio_file, self.task_id, audio_url, self.db_handler, download_dir, ip, port, result_datestr, result_uploader, result_title)
                 if audio_file_path:
-                    self.status_display.controls.append(ft.Text(f"音频文件已下载: {audio_file_path}", size=14, color=ft.Colors.GREEN))
+                    self.status_display.controls.append(ft.Text(f"音频文件已下载: {audio_file_path}", size=11, color=ft.Colors.GREEN))
 
                     # 清理远程音频文件
-                    if cleanup_remote_audio(self.task_id):
-                        self.status_display.controls.append(ft.Text("远程音频文件已清理", size=14, color=ft.Colors.GREEN))
+                    clean_state = await loop.run_in_executor(None, cleanup_remote_audio, self.task_id, ip, port)
+                    if clean_state:
+                        self.status_display.controls.append(ft.Text("远程音频文件已清理", size=11, color=ft.Colors.GREEN))
                     else:
-                        self.status_display.controls.append(ft.Text("远程音频文件清理失败", size=14, color=ft.Colors.ORANGE))
+                        self.status_display.controls.append(ft.Text("远程音频文件清理失败", size=11, color=ft.Colors.ORANGE))
                 else:
-                    self.status_display.controls.append(ft.Text("音频文件下载失败", size=14, color=ft.Colors.RED))
+                    self.status_display.controls.append(ft.Text("音频文件下载失败", size=11, color=ft.Colors.RED))
 
-            self.page.update()
+            self.status_display.update()
         except Exception as e:
             error_msg = f"保存结果时出错: {str(e)}"
-            self.status_display.controls.append(ft.Text(error_msg, size=14, color=ft.Colors.RED))
-            self.db_handler.save_task_error(self.task_id, error_msg)
-            self.page.update()
-
-def format_time(milliseconds):
-    """将毫秒转换为SRT时间格式 (HH:MM:SS,mmm)"""
-    try:
-        # 将毫秒转换为秒
-        seconds = milliseconds // 1000
-        # 计算毫秒部分
-        ms = milliseconds % 1000
-        # 计算小时、分钟和秒
-        hours = seconds // 3600
-        minutes = (seconds % 3600) // 60
-        secs = seconds % 60
-        # 格式化为SRT时间格式
-        result = f"{hours:02d}:{minutes:02d}:{secs:02d},{ms:03d}"
-        return result
-    except Exception as e:
-        # 如果转换失败，返回默认值
-        print(f"时间格式转换错误: {e}")
-        traceback.print_exc()  # 添加详细的错误追踪
-        return "00:00:00,000"
-
-def generate_smart_srt(inference_result, min_length=10):
-    """
-    智能SRT生成：
-    - 硬标点 (。？！)：强制换行
-    - 软标点 (，、)：只有当前句长度超过 min_length 时才换行，否则合并
-    """
-    try:
-        # 1. 提取数据
-        data = inference_result[0] if isinstance(inference_result, list) else inference_result
-
-        # 检查数据结构，兼容不同的输入格式
-        if isinstance(data, dict):
-            # 尝试从不同的字段获取文本
-            text = ""
-            if 'text' in data:
-                text = data['text']
-            elif 'transcription' in data:
-                text = data['transcription']
-            elif 'srt' in data:
-                # 如果已经有SRT内容，直接返回
-                print("检测到已有的SRT内容，直接返回")
-                return data['srt']
-
-            # 获取时间戳
-            ts_list = data.get('timestamp', [])
-
-            print(f"提取到的文本长度: {len(text)}, 时间戳数量: {len(ts_list)}")  # 添加调试信息
-        else:
-            print("输入数据格式不符合预期")
-            return ""
-
-        # 2. 定义标点集合
-        # 硬断句：句号、问号、感叹号、分号
-        hard_break_chars = set("。？！；：?!;:\n")
-        # 软断句：逗号、顿号、空格
-        soft_break_chars = set(".，、, ")
-
-        srt_content = ""
-        sentence_idx = 1
-        ts_index = 0  # 时间戳指针
-
-        # 当前行的状态缓存
-        curr_text = ""
-        curr_start = -1
-        curr_end = 0
-
-        for char in text:
-            # --- A. 处理时间戳 (如果是有效文字) ---
-            is_punctuation = char in hard_break_chars or char in soft_break_chars or char.isspace()
-
-            if not is_punctuation:
-                if ts_index < len(ts_list):
-                    start, end = ts_list[ts_index]
-                    # 如果是当前行的第一个字
-                    if curr_start == -1:
-                        curr_start = start
-                    # 更新当前行的结束时间
-                    curr_end = end
-                    ts_index += 1
-
-            # --- B. 拼接字符 ---
-            curr_text += char
-
-            # --- C. 判断是否断句 ---
-            should_flush = False
-
-            # C1. 硬断句：遇到句号，必须断
-            if char in hard_break_chars:
-                should_flush = True
-
-            # C2. 软断句：遇到逗号，看字数够不够
-            elif char in soft_break_chars:
-                # 只有当当前句长度 >= 设定的最小长度时，才断开
-                # 否则就忽略这个逗号，继续往后拼
-                if len(curr_text) >= min_length:
-                    should_flush = True
-
-            # --- D. 执行断句 ---
-            if should_flush and curr_text.strip():
-                # 防御：万一全是标点或没时间戳
-                if curr_start == -1:
-                    curr_start = curr_end # 兜底
-
-                srt_content += f"{sentence_idx}\n"
-                srt_content += f"{format_time(curr_start)} --> {format_time(curr_end)}\n"
-                srt_content += f"{curr_text.strip()}\n\n" # strip去掉首尾空格
-
-                sentence_idx += 1
-                # 重置状态
-                curr_text = ""
-                curr_start = -1
-
-        # --- E. 处理残留文本 ---
-        if curr_text.strip():
-            if curr_start == -1: curr_start = curr_end
-            srt_content += f"{sentence_idx}\n"
-            srt_content += f"{format_time(curr_start)} --> {format_time(curr_end)}\n"
-            srt_content += f"{curr_text.strip()}\n\n"
-
-        print(f"生成的SRT内容长度: {len(srt_content)}")  # 添加调试信息
-        return srt_content
-    except Exception as e:
-        print(f"生成SRT字幕时出错: {e}")
-        traceback.print_exc()  # 添加详细的错误追踪
-        return ""
+            self.status_display.controls.append(ft.Text(error_msg, size=11, color=ft.Colors.RED))
+            self.status_display.update()
+            await loop.run_in_executor(None, self.db_handler.save_task_error, self.task_id, error_msg)
 
 def main(page: ft.Page):
     global selected_task_id
     selected_task_id = None
 
     # 页面基本设置
-    page.title = "Video to Text Converter"
-    page.window_width = 1200
-    page.window_height = 800
+    page.title = "Video2Text 一键视频语音识别"
+    page.window.width = 1200
+    page.window.height = 800
+    page.window.min_width = 800
+    page.window.min_height = 600
+    system_name = platform.system()
+    if system_name == "Windows":
+        font_name = "Microsoft YaHei UI"
+    elif system_name == "Darwin": # macOS
+        font_name = "PingFang SC"
+    else:
+        font_name = "sans-serif" # Linux 或其他
+    page.theme = ft.Theme(font_family=font_name)
     page.theme_mode = ft.ThemeMode.SYSTEM
 
     # 初始化数据库
@@ -565,12 +490,9 @@ def main(page: ft.Page):
         # 显示准备发送的数据
         status_display.controls.clear()
         status_display.controls.append(ft.Text("准备发送请求...", size=16))
-        status_display.controls.append(ft.Text(f"URL: {url}", size=14))
-        status_display.controls.append(ft.Text(f"浏览器: {browser}", size=14))
-        status_display.controls.append(ft.Text(f"使用Cookie: {use_cookie}", size=14))
-        status_display.controls.append(ft.Text(f"回传下载: {return_download}", size=14))
+        status_display.controls.append(ft.Text(f"URL: {url}\n浏览器: {browser}\n使用Cookie: {use_cookie}\n回传下载: {return_download}", size=11))
         if encrypted_cookie_data:
-            status_display.controls.append(ft.Text("Cookie数据已加密", size=14, color=ft.Colors.GREEN))
+            status_display.controls.append(ft.Text("Cookie数据已加密", size=11, color=ft.Colors.GREEN))
         page.update()
 
         # 发送主任务请求到远程服务
@@ -631,12 +553,13 @@ def main(page: ft.Page):
     # 6. 任务状态显示区域
     status_display = ft.Column(
         controls=[
-            ft.Text("任务状态", size=16, weight=ft.FontWeight.BOLD),
-            ft.Divider(),
+            ft.Text("任务状态", size=14, weight=ft.FontWeight.BOLD),
+            # ft.Divider(),
             ft.Text("暂无任务", color=ft.Colors.GREY)
         ],
         spacing=10,
-        expand=True
+        expand=True,
+        horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
     )
 
     status_container = ft.Container(
@@ -664,10 +587,19 @@ def main(page: ft.Page):
     )
 
     # 加载历史任务函数
-    def load_history_tasks():
+    def load_history_tasks(clear=False):
         """加载历史任务到界面"""
         try:
             tasks = db_handler.get_recent_tasks(100)  # 最多加载100个任务
+
+            if clear:
+                # 将非completed状态的任务标记为failed
+                for task in tasks:
+                    if task["status"] not in ["completed"]:
+                        db_handler.update_task_status(task["id"], "failed", "任务被中断")
+                # 重新获取更新后的任务列表
+                tasks = db_handler.get_recent_tasks(100)
+
             history_list.controls.clear()
 
             if not tasks:
@@ -706,72 +638,78 @@ def main(page: ft.Page):
                 if "text" in task["result"]:
                     result_preview = task["result"]["text"][:50] + "..." if len(task["result"]["text"]) > 50 else task["result"]["text"]
                 elif "transcription" in task["result"]:
-                    result_preview = task["result"]["transcription"][:50] + "..." if len(task["result"]["transcription"]) > 50 else task["result"]["transcription"]
+                    result_preview = task["result"]["transcription"][:320] + "..." if len(task["result"]["transcription"]) > 320 else task["result"]["transcription"]
             else:
                 result_str = str(task["result"])
-                result_preview = result_str[:50] + "..." if len(result_str) > 50 else result_str
+                result_preview = result_str[:200] + "..." if len(result_str) > 200 else result_str
             result_uploader = task["result"].get("uploader", "未知作者")
             result_title = task["result"].get("title", "未知标题")
-            result_preview = f"[{result_uploader}][{result_title}]{result_preview}"
+            result_title = result_title[:60] + "..." if len(result_title) > 60 else result_title
+            result_coockie_status = task["result"].get("cookie_status", 0)
+            if result_coockie_status == 0:
+                result_coockie = "⬜"
+            elif result_coockie_status == 1:
+                result_coockie = "🍪"
+            else:
+                result_coockie = "⛔"
+            result_preview = f"{result_coockie} 🧑{result_uploader} ✍️{result_title} ➡️{result_preview}"
 
-        # 创建任务卡片
-        card = ft.Card(
-            content=ft.Container(
-                content=ft.Column(
-                    controls=[
-                        ft.Row(
-                            controls=[
-                                ft.Text(f"任务ID: {task_id[:8]}...", size=14, weight=ft.FontWeight.BOLD),
-                                ft.Text(f"状态: {status}", size=14, color=status_color)
-                            ],
-                            alignment=ft.MainAxisAlignment.SPACE_BETWEEN
-                        ),
-                        ft.Text(f"URL: {url[:50]}{'...' if len(url) > 50 else ''}", size=12),
-                        ft.Text(f"进度: {progress}", size=12),
-                        ft.Text(f"结果预览: {result_preview}" if result_preview else "结果: 无", size=12, color=ft.Colors.GREY),
-                        ft.Text(f"创建时间: {created_at}", size=12, color=ft.Colors.GREY),
-                        ft.Row(
-                            controls=[
-                                ft.IconButton(
-                                    icon=ft.Icons.INFO,
-                                    tooltip="查看详情",
-                                    on_click=lambda e, tid=task_id: show_task_details(tid)
-                                ),
-                                ft.IconButton(
-                                    icon=ft.Icons.CONTENT_COPY,
-                                    tooltip="复制结果",
-                                    on_click=lambda e, tid=task_id: copy_task_result(tid)
-                                ) if status == "completed" else ft.Container(),
-                                ft.IconButton(
-                                    icon=ft.Icons.AUDIOTRACK,
-                                    tooltip="复制音频路径",
-                                    on_click=lambda e, tid=task_id: copy_audio_path_from_task(tid)
-                                ) if status == "completed" and task.get("audio_file_path") else ft.Container(),
-                                ft.IconButton(
-                                    icon=ft.Icons.DOWNLOAD,
-                                    tooltip="导出字幕",
-                                    on_click=lambda e, tid=task_id: export_subtitle(tid)
-                                ) if status == "completed" and task.get("result") else ft.Container(),
-                                ft.IconButton(
-                                    icon=ft.Icons.SETTINGS,
-                                    tooltip="高级导出",
-                                    on_click=lambda e, tid=task_id: show_advanced_export_dialog(tid)
-                                ) if status == "completed" else ft.Container()
-                            ],
-                            alignment=ft.MainAxisAlignment.END
-                        )
-                    ],
-                    spacing=5
-                ),
-                padding=10
-            )
+        # 左侧信息栏
+        left_column = ft.Column(
+            controls=[
+                ft.Text(f"URL: {url[:55]}{'...' if len(url) > 55 else ''}, ID: {task_id[:10]}...", size=14, selectable=True, weight=ft.FontWeight.BOLD),
+                ft.Text(f" {result_preview}" if result_preview else "结果: 无", size=12, color=ft.Colors.GREY, max_lines=4, overflow=ft.TextOverflow.ELLIPSIS),
+            ],
+            spacing=5,
+            expand=True # 让左栏撑满可用空间
         )
 
+        # 右侧状态与操作栏
+        right_column = ft.Column(
+            controls=[
+                ft.Text(f"状态: {status}", size=14, color=status_color, weight=ft.FontWeight.BOLD),
+                ft.Text(f"{created_at}", size=12, color=ft.Colors.GREY),
+                ft.Row(
+                    controls=[
+                        ft.IconButton(icon=ft.Icons.DELETE, tooltip="删除条目", on_click=lambda e, tid=task_id: delete_task_entry(tid, history_list, db_handler), icon_color=ft.Colors.RED_300) if status in ["completed", "failed"] else ft.Container(),
+                        ft.IconButton(icon=ft.Icons.DOWNLOAD, tooltip="导出字幕", on_click=lambda e, tid=task_id: export_subtitle(tid)) if status == "completed" and task.get("result") else ft.Container(),
+                        ft.IconButton(icon=ft.Icons.INFO, tooltip="查看详情", on_click=lambda e, tid=task_id: show_task_details(tid)),
+                        ft.IconButton(icon=ft.Icons.CONTENT_COPY, tooltip="复制结果", on_click=lambda e, tid=task_id: copy_task_result(tid)) if status == "completed" else ft.Container(),
+                        ft.IconButton(icon=ft.Icons.SETTINGS, tooltip="高级导出", on_click=lambda e, tid=task_id: show_interactive_editor_dialog(page, tid, db_handler)) if status == "completed" else ft.Container(),
+                    ],
+                    spacing=0, # 按钮间距调小
+                    alignment=ft.MainAxisAlignment.END,
+                )
+            ],
+            spacing=5,
+            # 【关键】让右栏内容右上对齐
+            alignment=ft.MainAxisAlignment.START,
+            horizontal_alignment=ft.CrossAxisAlignment.END,
+            width=250 # 给右栏一个固定宽度
+        )
+        # 组合左右两栏
+        card_content = ft.Row(
+            controls=[
+                left_column,
+                right_column
+            ],
+            vertical_alignment=ft.CrossAxisAlignment.START, # 顶部对齐
+            spacing=20
+        )
+        # 创建最终的卡片
+        card = ft.Card(
+            content=ft.Container(
+                content=card_content,
+                padding=15
+            )
+        )
         # 使用GestureDetector包装Card以实现点击功能
         gesture_detector = ft.GestureDetector(
             content=card,
             on_tap=lambda e, tid=task_id: select_task(tid)
         )
+        # 将任务ID存储在gesture_detector中，方便后续查找
+        gesture_detector.task_id = task_id
         return gesture_detector
 
     # 选中任务函数
@@ -1091,6 +1029,52 @@ def main(page: ft.Page):
             page.snack_bar.open = True
             page.update()
 
+    # 删除任务条目函数
+    def delete_task_entry(task_id, history_list, db_handler):
+        """从数据库和列表中删除任务条目"""
+        print(f"Attempting to delete task: {task_id}")  # 调试信息
+        try:
+            # 从数据库中删除任务
+            if db_handler.delete_task(task_id):
+                print(f"Task {task_id} deleted from database")  # 调试信息
+                # 从UI列表中移除任务卡片
+                removed = False
+                for i in range(len(history_list.controls) - 1, -1, -1):  # 逆序遍历避免索引问题
+                    control = history_list.controls[i]
+                    # 检查控件是否有task_id属性
+                    if hasattr(control, 'task_id') and control.task_id == task_id:
+                        history_list.controls.pop(i)
+                        print(f"Task {task_id} removed from UI at index {i}")  # 调试信息
+                        removed = True
+                        break
+
+                if not removed:
+                    print(f"Task {task_id} not found in UI controls")  # 调试信息
+
+                history_list.update()
+                page.snack_bar = ft.SnackBar(
+                    content=ft.Text("任务条目已删除"),
+                    bgcolor=ft.Colors.GREEN_500
+                )
+            else:
+                print(f"Failed to delete task {task_id} from database")  # 调试信息
+                page.snack_bar = ft.SnackBar(
+                    content=ft.Text("删除任务条目失败"),
+                    bgcolor=ft.Colors.RED_500
+                )
+            page.snack_bar.open = True
+            page.update()
+        except Exception as e:
+            print(f"Exception in delete_task_entry: {e}")  # 调试信息
+            import traceback
+            traceback.print_exc()  # 打印完整的错误堆栈
+            page.snack_bar = ft.SnackBar(
+                content=ft.Text(f"删除任务条目时出错: {str(e)}"),
+                bgcolor=ft.Colors.RED_500
+            )
+            page.snack_bar.open = True
+            page.update()
+
     # 在文件资源管理器中打开文件函数
     def open_file_in_explorer(file_path):
         """在文件资源管理器中打开文件所在目录并选中文件"""
@@ -1126,179 +1110,164 @@ def main(page: ft.Page):
             )
             page.snack_bar.open = True
             page.update()
+            
+    def show_interactive_editor_dialog(page: ft.Page, task_id, db_handler):
+        """
+        显示交互式字幕编辑器对话框
+        """
+        # 1. 获取数据
+        task = db_handler.get_task_by_id(task_id)
+        if not task or not task['result']:
+            page.snack_bar = ft.SnackBar(content=ft.Text("数据不可用"), bgcolor=ft.Colors.RED)
+            page.snack_bar.open = True
+            page.update()
+            return
+        
+        raw_result = task['result']
+        
+        # 2. 准备初始状态
+        # 默认文件名生成
+        result_datestr = raw_result.get("datestr", "251212")
+        result_uploader = raw_result.get("uploader", "未知作者")
+        result_title = raw_result.get("title", "未知标题")
+        default_filename = f"{result_datestr}_{result_uploader}_{result_title}_{task_id[:5]}"
+        default_filename = sanitize_filename(default_filename)
+        
+        # 3. 定义 UI 控件 (Controls)
+        
+        # A. 字幕预览编辑器 (核心组件)
+        editor_field = ft.TextField(
+            value="", # 初始为空，稍后通过 slider 初始化
+            multiline=True,
+            min_lines=15,
+            max_lines=15,
+            text_size=14,
+            text_style=ft.TextStyle(font_family="Consolas, monospace"), # 等宽字体方便看时间轴
+            border_color=ft.Colors.OUTLINE,
+            expand=True
+        )
+        
+        # B. 滑块状态显示文本
+        min_length_default = 15 if is_mainly_cjk(raw_result.get("transcription", "缺省内容")) else 40
+        slider_label = ft.Text(f"当前断句阈值: {min_length_default} 字")
+        
+        # C. 滑块事件处理函数
+        def on_slider_change(e):
+            min_len = int(e.control.value)
+            slider_label.value = f"当前断句阈值: {min_len} 字"
+            
+            # 核心：重新计算 SRT 内容并填入编辑器
+            # 注意：这里我们假设用户还在调整滑块，所以会覆盖手动编辑的内容。
+            # 如果你想做得更高级，可以加个锁或者提示，但这是最还原 Streamlit 的做法。
+            new_content = generate_smart_srt(raw_result, min_length=min_len)
+            editor_field.value = new_content
+            editor_field.update()
+            slider_label.update()
 
-    # 显示高级导出对话框函数
-    def show_advanced_export_dialog(task_id):
-        """显示高级导出字幕对话框"""
-        try:
-            task = db_handler.get_task_by_id(task_id)
-            if not task or not task['result']:
-                page.snack_bar = ft.SnackBar(
-                    content=ft.Text("任务结果不可用，无法导出字幕"),
-                    bgcolor=ft.Colors.RED_500
+        # D. 滑块组件
+        length_slider = ft.Slider(
+            min=8, max=80, divisions=45, value=min_length_default,
+            label="{value}",
+            on_change=on_slider_change
+        )
+        
+        # E. 底部文件名和保存按钮
+        filename_input = ft.TextField(
+            label="文件名 (无需后缀)", 
+            value=default_filename, 
+            expand=True,
+            height=40,
+            text_size=12, 
+            label_style=ft.TextStyle(size=13),
+            content_padding=ft.padding.only(left=10, right=10, bottom=10),
+        )
+        
+        # F. 保存函数
+        def save_subtitle(e):
+            try:
+                # 获取当前编辑器里的内容（包含用户刚才可能的手动修改）
+                final_content = editor_field.value
+                fname = filename_input.value
+                
+                download_dir = "download"
+                if not os.path.exists(download_dir):
+                    os.makedirs(download_dir)
+                
+                full_path = os.path.join(download_dir, f"{fname}.srt")
+                
+                with open(full_path, "w", encoding="utf-8") as f:
+                    f.write(final_content)
+                
+                page.close(dlg) # 关闭对话框
+                
+                # 成功提示弹窗
+                def open_folder(_):
+                    folder_path = os.path.abspath(download_dir)
+                    if os.name == 'nt': os.system(f'explorer "{folder_path}"')
+                    elif os.name == 'posix': os.system(f'xdg-open "{folder_path}"')
+                    page.close(success_dlg)
+
+                success_dlg = ft.AlertDialog(
+                    title=ft.Text("导出成功"),
+                    content=ft.Text(f"文件已保存至:\n{full_path}"),
+                    actions=[
+                        ft.TextButton("打开文件夹", on_click=open_folder),
+                        ft.TextButton("关闭", on_click=lambda _: page.close(success_dlg))
+                    ]
                 )
+                page.open(success_dlg)
+                
+            except Exception as ex:
+                page.snack_bar = ft.SnackBar(content=ft.Text(f"保存失败: {ex}"), bgcolor=ft.Colors.RED)
                 page.snack_bar.open = True
                 page.update()
-                return
 
-            # 创建断句长度输入框
-            min_length_input = ft.TextField(
-                label="断句最小长度",
-                hint_text="软标点断句的最小字符数",
-                value="10",
-                keyboard_type=ft.KeyboardType.NUMBER,
-                width=200
-            )
+        # 4. 组装对话框内容
+        
+        # 初始化一次内容
+        initial_content = generate_smart_srt(raw_result, min_length=min_length_default)
+        editor_field.value = initial_content
 
-            # 创建文件名输入框
-            task = db_handler.get_task_by_id(task_id)
-            result = task['result']
-            result_datestr = result.get("datestr", "251212")
-            result_uploader = result.get("uploader", "未知作者")
-            result_title = result.get("title", "未知标题")
-            file_name = f"{result_datestr}_{result_uploader}_{result_title}_{task_id[:5]}.srt"
-            file_name = sanitize_filename(file_name)
-            filename_input = ft.TextField(
-                label="文件名",
-                hint_text="不包括扩展名",
-                value=f"{file_name}",
-                width=300
-            )
-
-            # 创建格式选择下拉框
-            format_dropdown = ft.Dropdown(
-                label="字幕格式",
-                options=[
-                    ft.dropdown.Option("SRT"),
-                    ft.dropdown.Option("TXT")
-                ],
-                value="SRT",
-                width=150
-            )
-
-            # 创建对话框内容
-            dlg_content = ft.Column(
-                controls=[
-                    ft.Text("高级导出设置", size=16, weight=ft.FontWeight.BOLD),
-                    ft.Divider(),
-                    min_length_input,
+        dlg_content = ft.Column(
+            controls=[
+                # ft.Text("智能断句调整", size=16, weight=ft.FontWeight.BOLD),
+                ft.Container(
+                    content=ft.Column([
+                        slider_label,
+                        length_slider,
+                        ft.Text("💡 提示：向右拖动可合并短句，编辑器支持直接修改文字。", size=12, color=ft.Colors.GREY)
+                    ]),
+                    bgcolor=ft.Colors.WHITE,
+                    padding=10,
+                    border_radius=5
+                ),
+                editor_field, # 中间的大编辑器
+                ft.Divider(),
+                ft.Row([
                     filename_input,
-                    format_dropdown
-                ],
-                spacing=15,
-                width=250,
-                height=250
-            )
+                    ft.ElevatedButton(
+                        "保存 SRT", 
+                        icon=ft.Icons.SAVE, 
+                        on_click=save_subtitle,
+                        style=ft.ButtonStyle(bgcolor=ft.Colors.PRIMARY, color=ft.Colors.ON_PRIMARY)
+                    )
+                ])
+            ],
+            width=900, # 设置得宽一点
+            height=600, # 设置得高一点
+            scroll=ft.ScrollMode.AUTO
+        )
 
-            # 创建对话框
-            dlg = ft.AlertDialog(
-                title=ft.Text("高级导出字幕"),
-                content=dlg_content,
-                actions=[
-                    ft.TextButton("取消", on_click=lambda e: page.close(dlg)),
-                    ft.TextButton("导出", on_click=lambda e: export_subtitle_advanced(
-                        task_id,
-                        int(min_length_input.value) if min_length_input.value.isdigit() else 10,
-                        filename_input.value,
-                        format_dropdown.value
-                    ))
-                ]
-            )
-            page.open(dlg)
-        except Exception as e:
-            page.snack_bar = ft.SnackBar(
-                content=ft.Text(f"显示高级导出对话框失败: {str(e)}"),
-                bgcolor=ft.Colors.RED_500
-            )
-            page.snack_bar.open = True
-            page.update()
-
-    # 高级导出字幕函数
-    def export_subtitle_advanced(task_id, min_length=10, filename="subtitle", format="SRT"):
-        """高级导出字幕"""
-        try:
-            task = db_handler.get_task_by_id(task_id)
-            if not task or not task['result']:
-                page.snack_bar = ft.SnackBar(
-                    content=ft.Text("任务结果不可用，无法导出字幕"),
-                    bgcolor=ft.Colors.RED_500
-                )
-                page.snack_bar.open = True
-                page.update()
-                return
-
-            # 获取结果数据
-            result = task['result']
-
-            # 生成SRT内容
-            srt_content = generate_smart_srt(result, min_length)
-
-            if not srt_content:
-                page.snack_bar = ft.SnackBar(
-                    content=ft.Text("生成字幕内容失败"),
-                    bgcolor=ft.Colors.RED_500
-                )
-                page.snack_bar.open = True
-                page.update()
-                return
-
-            # 确定文件扩展名
-            extension = ".srt" if format.upper() == "SRT" else ".txt"
-
-            # 确保下载目录存在
-            download_dir = "download"
-            if not os.path.exists(download_dir):
-                os.makedirs(download_dir)
-
-            # 构建完整的文件路径
-            file_path = os.path.join(download_dir, f"{filename}{extension}")
-
-            # 写入文件
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(srt_content)
-
-            # 显示成功消息
-            page.snack_bar = ft.SnackBar(
-                content=ft.Text(f"字幕文件已导出: {file_path}"),
-                bgcolor=ft.Colors.GREEN_500
-            )
-            page.snack_bar.open = True
-
-            # 询问是否打开文件位置
-            def open_folder(e):
-                try:
-                    if os.name == 'nt':  # Windows
-                        os.system(f'explorer /select,"{file_path}"')
-                    elif os.name == 'posix' and os.uname().sysname == 'Darwin':  # macOS
-                        os.system(f'open -R "{file_path}"')
-                    elif os.name == 'posix':  # Linux
-                        directory = os.path.dirname(file_path)
-                        os.system(f'xdg-open "{directory}"')
-                except Exception as ex:
-                    print(f"打开文件位置时出错: {ex}")
-                finally:
-                    page.close(confirm_dlg)
-
-            def close_dialog(e):
-                page.close(confirm_dlg)
-
-            confirm_dlg = ft.AlertDialog(
-                title=ft.Text("导出成功"),
-                content=ft.Text(f"字幕文件已导出到:\n{file_path}\n\n是否要打开文件所在位置?"),
-                actions=[
-                    ft.TextButton("否", on_click=close_dialog),
-                    ft.TextButton("是", on_click=open_folder)
-                ]
-            )
-            page.open(confirm_dlg)
-            page.update()
-        except Exception as e:
-            page.snack_bar = ft.SnackBar(
-                content=ft.Text(f"导出字幕失败: {str(e)}"),
-                bgcolor=ft.Colors.RED_500
-            )
-            page.snack_bar.open = True
-            page.update()
+        dlg = ft.AlertDialog(
+            title=ft.Text("字幕编辑器"),
+            content=dlg_content,
+            actions=[
+                ft.TextButton("关闭", on_click=lambda e: page.close(dlg))
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        
+        page.open(dlg)
 
     # 导出字幕函数
     def export_subtitle(task_id):
@@ -1318,11 +1287,11 @@ def main(page: ft.Page):
 
             # 获取结果数据
             result = task['result']
-            result_dbg = result.get('transcription',"")[:100]
-            print(f"获取到的结果数据: {result_dbg}")  # 添加调试信息
+            result_dbg = result.get('transcription',"")[:500]
+            min_length_default = 15 if is_mainly_cjk(result_dbg) else 40
 
             # 生成SRT内容
-            srt_content = generate_smart_srt(result)
+            srt_content = generate_smart_srt(result, min_length_default)
             print(f"生成的SRT内容长度: {len(srt_content)}")  # 添加调试信息
 
             if not srt_content:
@@ -1438,7 +1407,7 @@ def main(page: ft.Page):
                 expand=True
             )
         ],
-        expand=False,
+        # expand=False,
         height=150  # 增加高度以提供更多显示空间
     )
 
@@ -1447,16 +1416,12 @@ def main(page: ft.Page):
         controls=[
             ft.Column(
                 controls=[
-                    ft.Text("历史任务", size=16, weight=ft.FontWeight.BOLD),
-                    ft.Divider(),
+                    # ft.Text("历史任务", size=16, weight=ft.FontWeight.BOLD),
+                    # ft.Divider(),
                     history_container
                 ],
                 expand=1
             ),
-            # ft.Column(
-            #     controls=[result_container],
-            #     width=300
-            # )
         ],
         spacing=15,
         expand=True
@@ -1478,7 +1443,7 @@ def main(page: ft.Page):
     page.add(main_layout)
 
     # 加载历史任务
-    load_history_tasks()
+    load_history_tasks(clear=True)
 
 if __name__ == "__main__":
     ft.app(target=main)

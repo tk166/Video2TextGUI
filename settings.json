@@ -1,0 +1,10 @@
+{
+    "server": {
+        "ip": "tkmini.local",
+        "port": 5001
+    },
+    "paths": {
+        "download_dir": "download",
+        "db_dir": "task.db"
+    }
+}

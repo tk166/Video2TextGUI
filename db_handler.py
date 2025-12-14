@@ -20,7 +20,8 @@ class DatabaseHandler:
         Args:
             db_path (str): 数据库文件路径
         """
-        self.db_path = db_path
+        # 规范化数据库路径以确保跨平台兼容性
+        self.db_path = os.path.normpath(db_path)
         # 确保数据库连接使用UTF-8编码
         self.init_db()
 
@@ -203,6 +204,33 @@ class DatabaseHandler:
             return True
         except Exception as e:
             print(f"保存任务错误时出错: {e}")
+            return False
+
+    def delete_task(self, task_id: str) -> bool:
+        """
+        删除任务记录
+
+        Args:
+            task_id (str): 任务ID
+
+        Returns:
+            bool: 是否成功删除
+        """
+        try:
+            # 使用UTF-8编码连接数据库
+            conn = sqlite3.connect(self.db_path)
+            conn.text_factory = lambda x: str(x, 'utf-8', 'ignore') if isinstance(x, bytes) else str(x)
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                DELETE FROM tasks WHERE id = ?
+            """, (task_id,))
+
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            print(f"删除任务时出错: {e}")
             return False
 
     def get_task_by_id(self, task_id: str) -> Optional[Dict[str, Any]]:
