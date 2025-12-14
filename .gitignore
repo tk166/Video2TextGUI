@@ -17,6 +17,9 @@ env/
 ENV/
 .venv/
 .env/
+dist/
+build/
+*.spec
 
 # IDE files
 .vscode/
@@ -57,6 +60,7 @@ key.txt
 .*.swo
 
 # Downloads
+setting*.json
 download/
 task.db
 *.db

@@ -17,20 +17,37 @@ from audio_downloader import download_audio_file, cleanup_remote_audio
 from crypto_utils import encrypt_data
 from srt_utils import generate_smart_srt, is_mainly_cjk
 
-# 设置设置环境变量以及默认编码UTF-8
-if sys.version_info[0] == 3 and sys.version_info[1] >= 7:
-    # 对于Python 3.7及以上版本
-    import io
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', line_buffering=True)
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', line_buffering=True)
-sys.stdout.reconfigure(line_buffering=True)
+# 命令行Debug输出的配置
+is_noconsole = False
+if getattr(sys, 'frozen', False) and sys.stdout is None:
+    is_noconsole = True
+    sys.stdout = open(os.devnull, 'w', encoding='utf-8')
+    sys.stderr = open(os.devnull, 'w', encoding='utf-8')
+if sys.stdout is not None and not is_noconsole:
+    if sys.version_info[0] == 3 and sys.version_info[1] >= 7:
+        import io
+        if hasattr(sys.stdout, 'buffer'):
+            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', line_buffering=True)
+        if hasattr(sys.stderr, 'buffer'):
+            sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', line_buffering=True)
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(line_buffering=True)
+
 os.environ['PYTHONIOENCODING'] = 'utf-8'
 os.environ['NO_PROXY'] = '.local,127.0.0.1,localhost'
+
+# 判断是否是打包后的 exe 环境
+if getattr(sys, 'frozen', False):
+    # 如果是 exe，基础路径就是 exe 所在的目录
+    base_path = os.path.dirname(sys.executable)
+else:
+    # 如果是脚本运行，基础路径是脚本所在目录
+    base_path = os.path.dirname(os.path.abspath(__file__))
 
 # 加载配置文件
 def load_config():
     """加载配置文件"""
-    config_path = os.path.join(os.path.dirname(__file__), 'settings.json')
+    config_path = os.path.join(base_path, 'settings.json')
 
     # 默认配置
     default_config = {
@@ -68,8 +85,17 @@ def load_config():
         print(f"加载配置文件失败: {e}，使用默认配置")
         return default_config
 
+def load_encrypt_pwd():
+    """加载Coockie加密密码"""
+    pwd = None
+    key_path = os.path.join(base_path, 'key.txt')
+    with open(key_path, 'r') as f:
+        pwd = f.read().strip()
+    return pwd
+
 # 全局配置变量
 CONFIG = load_config()
+ENCRYPT_PWD = load_encrypt_pwd()
 
 # 获取指定浏览器的Cookie
 def get_cookies_via_rookie(browser_name):
@@ -389,12 +415,16 @@ def main(page: ft.Page):
     system_name = platform.system()
     if system_name == "Windows":
         font_name = "Microsoft YaHei UI"
+        icon_path = "/icon.ico"
     elif system_name == "Darwin": # macOS
         font_name = "PingFang SC"
+        icon_path = "/icon.png"
     else:
         font_name = "sans-serif" # Linux 或其他
+        icon_path = "/icon.png"
     page.theme = ft.Theme(font_family=font_name)
     page.theme_mode = ft.ThemeMode.SYSTEM
+    page.window.icon = icon_path
 
     # 初始化数据库
     db_handler = init_db()
@@ -474,7 +504,7 @@ def main(page: ft.Page):
                         status_display.update()
                     else:
                         # 加密Cookie数据
-                        encrypted_cookie_data = encrypt_data(cookie_data)
+                        encrypted_cookie_data = encrypt_data(cookie_data, password=ENCRYPT_PWD)
                         if encrypted_cookie_data is None:
                             status_display.controls.clear()
                             status_display.controls.append(ft.Text("Cookie加密失败", size=16, color=ft.Colors.RED))
@@ -1036,11 +1066,11 @@ def main(page: ft.Page):
     # 删除任务条目函数
     def delete_task_entry(task_id, history_list, db_handler):
         """从数据库和列表中删除任务条目"""
-        print(f"Attempting to delete task: {task_id}")  # 调试信息
+        print(f"Attempting to delete task: {task_id}")
         try:
             # 从数据库中删除任务
             if db_handler.delete_task(task_id):
-                print(f"Task {task_id} deleted from database")  # 调试信息
+                print(f"Task {task_id} deleted from database")
                 # 从UI列表中移除任务卡片
                 removed = False
                 for i in range(len(history_list.controls) - 1, -1, -1):  # 逆序遍历避免索引问题
@@ -1048,12 +1078,12 @@ def main(page: ft.Page):
                     # 检查控件是否有task_id属性
                     if hasattr(control, 'task_id') and control.task_id == task_id:
                         history_list.controls.pop(i)
-                        print(f"Task {task_id} removed from UI at index {i}")  # 调试信息
+                        print(f"Task {task_id} removed from UI at index {i}")
                         removed = True
                         break
 
                 if not removed:
-                    print(f"Task {task_id} not found in UI controls")  # 调试信息
+                    print(f"Task {task_id} not found in UI controls")
 
                 history_list.update()
                 page.snack_bar = ft.SnackBar(
@@ -1061,7 +1091,7 @@ def main(page: ft.Page):
                     bgcolor=ft.Colors.GREEN_500
                 )
             else:
-                print(f"Failed to delete task {task_id} from database")  # 调试信息
+                print(f"Failed to delete task {task_id} from database")
                 page.snack_bar = ft.SnackBar(
                     content=ft.Text("删除任务条目失败"),
                     bgcolor=ft.Colors.RED_500
@@ -1069,7 +1099,7 @@ def main(page: ft.Page):
             page.snack_bar.open = True
             page.update()
         except Exception as e:
-            print(f"Exception in delete_task_entry: {e}")  # 调试信息
+            print(f"Exception in delete_task_entry: {e}")
             import traceback
             traceback.print_exc()  # 打印完整的错误堆栈
             page.snack_bar = ft.SnackBar(
@@ -1193,7 +1223,7 @@ def main(page: ft.Page):
                 final_content = editor_field.value
                 fname = filename_input.value
                 
-                download_dir = "download"
+                download_dir = CONFIG["paths"]["download_dir"]
                 if not os.path.exists(download_dir):
                     os.makedirs(download_dir)
                 
@@ -1201,9 +1231,7 @@ def main(page: ft.Page):
                 
                 with open(full_path, "w", encoding="utf-8") as f:
                     f.write(final_content)
-                
                 page.close(dlg) # 关闭对话框
-                
                 # 成功提示弹窗
                 def open_folder(_):
                     folder_path = os.path.abspath(download_dir)
@@ -1227,14 +1255,12 @@ def main(page: ft.Page):
                 page.update()
 
         # 4. 组装对话框内容
-        
         # 初始化一次内容
         initial_content = generate_smart_srt(raw_result, min_length=min_length_default)
         editor_field.value = initial_content
 
         dlg_content = ft.Column(
             controls=[
-                # ft.Text("智能断句调整", size=16, weight=ft.FontWeight.BOLD),
                 ft.Container(
                     content=ft.Column([
                         slider_label,
@@ -1245,7 +1271,7 @@ def main(page: ft.Page):
                     padding=10,
                     border_radius=5
                 ),
-                editor_field, # 中间的大编辑器
+                editor_field,
                 ft.Divider(),
                 ft.Row([
                     filename_input,
@@ -1257,8 +1283,8 @@ def main(page: ft.Page):
                     )
                 ])
             ],
-            width=900, # 设置得宽一点
-            height=600, # 设置得高一点
+            width=900,
+            height=600,
             scroll=ft.ScrollMode.AUTO
         )
 
@@ -1277,7 +1303,7 @@ def main(page: ft.Page):
     def export_subtitle(task_id):
         """导出字幕"""
         try:
-            print(f"开始导出字幕，任务ID: {task_id}")  # 添加调试信息
+            print(f"开始导出字幕，任务ID: {task_id}")
             task = db_handler.get_task_by_id(task_id)
             if not task or not task['result']:
                 page.snack_bar = ft.SnackBar(
@@ -1286,7 +1312,7 @@ def main(page: ft.Page):
                 )
                 page.snack_bar.open = True
                 page.update()
-                print(f"任务结果不可用，任务ID: {task_id}")  # 添加调试信息
+                print(f"任务结果不可用，任务ID: {task_id}")
                 return
 
             # 获取结果数据
@@ -1296,7 +1322,7 @@ def main(page: ft.Page):
 
             # 生成SRT内容
             srt_content = generate_smart_srt(result, min_length_default)
-            print(f"生成的SRT内容长度: {len(srt_content)}")  # 添加调试信息
+            print(f"生成的SRT内容长度: {len(srt_content)}")
 
             if not srt_content:
                 page.snack_bar = ft.SnackBar(
@@ -1305,14 +1331,14 @@ def main(page: ft.Page):
                 )
                 page.snack_bar.open = True
                 page.update()
-                print("生成字幕内容失败")  # 添加调试信息
+                print("生成字幕内容失败")
                 return
 
             # 确保下载目录存在
-            download_dir = "download"
+            download_dir = CONFIG["paths"]["download_dir"]
             if not os.path.exists(download_dir):
                 os.makedirs(download_dir)
-                print(f"创建下载目录: {download_dir}")  # 添加调试信息
+                print(f"创建下载目录: {download_dir}")
 
             # 构建完整的文件路径
             result_datestr = result.get("datestr", "251212")
@@ -1321,12 +1347,12 @@ def main(page: ft.Page):
             file_name = f"{result_datestr}_{result_uploader}_{result_title}_{task_id[:5]}.srt"
             file_name = sanitize_filename(file_name)
             file_path = os.path.join(download_dir, file_name)
-            print(f"字幕文件路径: {file_path}")  # 添加调试信息
+            print(f"字幕文件路径: {file_path}")
 
             # 写入文件
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(srt_content)
-            print(f"字幕文件已写入: {file_path}")  # 添加调试信息
+            print(f"字幕文件已写入: {file_path}")
 
             # 显示成功消息
             page.snack_bar = ft.SnackBar(
@@ -1363,7 +1389,7 @@ def main(page: ft.Page):
             )
             page.open(confirm_dlg)
             page.update()
-            print(f"字幕导出成功: {file_path}")  # 添加调试信息
+            print(f"字幕导出成功: {file_path}")
         except Exception as e:
             page.snack_bar = ft.SnackBar(
                 content=ft.Text(f"导出字幕失败: {str(e)}"),
@@ -1371,10 +1397,9 @@ def main(page: ft.Page):
             )
             page.snack_bar.open = True
             page.update()
-            print(f"导出字幕失败: {str(e)}")  # 添加调试信息
-            traceback.print_exc()  # 添加详细的错误追踪
+            print(f"导出字幕失败: {str(e)}")
+            traceback.print_exc()
 
-    # 页面布局
     # 顶部输入区域
     input_row = ft.Row(
         controls=[
@@ -1411,8 +1436,7 @@ def main(page: ft.Page):
                 expand=True
             )
         ],
-        # expand=False,
-        height=150  # 增加高度以提供更多显示空间
+        height=150
     )
 
     # 底部历史任务和结果操作区域
@@ -1420,8 +1444,6 @@ def main(page: ft.Page):
         controls=[
             ft.Column(
                 controls=[
-                    # ft.Text("历史任务", size=16, weight=ft.FontWeight.BOLD),
-                    # ft.Divider(),
                     history_container
                 ],
                 expand=1
@@ -1434,7 +1456,6 @@ def main(page: ft.Page):
     # 主布局
     main_layout = ft.Column(
         controls=[
-            # ft.Text("Video to Text Converter", size=24, weight=ft.FontWeight.BOLD),
             top_section,
             middle_section,
             bottom_section
@@ -1450,4 +1471,7 @@ def main(page: ft.Page):
     load_history_tasks(clear=True)
 
 if __name__ == "__main__":
-    ft.app(target=main)
+    assets_path = os.path.join(base_path, "assets")
+    ft.app(target=main, assets_dir=assets_path)
+
+# conda activate vg

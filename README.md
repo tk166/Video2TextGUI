@@ -41,6 +41,13 @@ pip install -r requirements.txt
 python main.py
 ```
 
+## Pyinstaller打包
+
+```shell
+pip install pyinstaller
+pyinstaller main.py --noconsole --onefile --name "Video2Text" --hidden-import=rookiepy --icon "assets/icon.ico"
+```
+
 ## 使用说明
 
 1. 在输入框中粘贴视频链接

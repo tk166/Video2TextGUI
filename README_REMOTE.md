@@ -1,4 +1,4 @@
-注：这是远程的Server的README文件，并不是需要在这里实现的功能
+注：这是远程的Server的README文件，并不是在这里实现的功能
 
 # Audio2Text 远程接口版本
 
